@@ -66,29 +66,54 @@ async function serveGame(gameKey) {
     }
 
     let chunkIndex = 0;
+    let chunkReader = null;
     const body = new ReadableStream({
       async pull(controller) {
-        if (chunkIndex >= chunkCount) {
-          db.close();
-          controller.close();
-          return;
-        }
-
         try {
-          const row = await readValue(db, "chunks", [gameKey, chunkIndex]);
-          if (!row || row.data == null) throw new Error("A saved game chunk is missing.");
-          const chunk = row.data instanceof Blob ? row.data : new Blob([row.data]);
-          controller.enqueue(new Uint8Array(await chunk.arrayBuffer()));
-          chunkIndex += 1;
+          while (true) {
+            if (chunkReader) {
+              const result = await chunkReader.read();
+              if (!result.done) {
+                controller.enqueue(result.value);
+                return;
+              }
+
+              chunkReader.releaseLock();
+              chunkReader = null;
+              chunkIndex += 1;
+            }
+
+            if (chunkIndex >= chunkCount) {
+              db.close();
+              controller.close();
+              return;
+            }
+
+            const row = await readValue(db, "chunks", [gameKey, chunkIndex]);
+            if (!row || row.data == null) throw new Error("A saved game chunk is missing.");
+            const chunk = row.data instanceof Blob ? row.data : new Blob([row.data]);
+            chunkReader = chunk.stream().getReader();
+          }
         } catch (error) {
+          if (chunkReader) {
+            try { await chunkReader.cancel(); } catch (_) {}
+            chunkReader = null;
+          }
           db.close();
           controller.error(error);
         }
       },
-      cancel() {
-        db.close();
+      async cancel() {
+        try {
+          if (chunkReader) {
+            await chunkReader.cancel();
+            chunkReader = null;
+          }
+        } finally {
+          db.close();
+        }
       }
-    });
+    }, { highWaterMark: 0 });
 
     return new Response(body, {
       status: 200,
