@@ -109,7 +109,7 @@
                   stroke-opacity .22s ease, opacity .22s ease, width .2s ease;
     }
     .btn .card { filter: url(#softShadow); }
-    .btn .edge { stroke: rgba(255,255,255,.075); stroke-width: 1; }
+    .btn .edge { fill: none; stroke: rgba(255,255,255,.075); stroke-width: 1; }
     .btn:not(.is-disabled):hover .edge,
     .btn:focus-visible .edge { stroke: var(--accent); stroke-opacity: .46; }
     .btn .focus-ring {
