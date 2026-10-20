@@ -36,28 +36,14 @@ function openVault() {
   });
 }
 
-async function readGame(gameKey) {
-  const db = await openVault();
-  try {
-    if (!db.objectStoreNames.contains("chunks")) throw new Error("No saved game chunks.");
-    return await new Promise((resolve, reject) => {
-      const transaction = db.transaction("chunks", "readonly");
-      const request = transaction.objectStore("chunks").index("game").getAll(IDBKeyRange.only(gameKey));
-      request.onsuccess = () => {
-        const rows = request.result || [];
-        rows.sort((left, right) => left.index - right.index);
-        if (!rows.length) {
-          reject(new Error("No saved game chunks."));
-          return;
-        }
-        resolve(new Blob(rows.map((row) => row.data), { type: "text/html" }));
-      };
-      request.onerror = () => reject(request.error);
-      transaction.onabort = () => reject(transaction.error);
-    });
-  } finally {
-    db.close();
-  }
+function readValue(db, storeName, key) {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, "readonly");
+    const request = transaction.objectStore(storeName).get(key);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
 }
 
 async function serveGame(gameKey) {
@@ -66,10 +52,51 @@ async function serveGame(gameKey) {
   }
 
   try {
-    const html = await readGame(gameKey);
-    return new Response(html, {
+    const db = await openVault();
+    if (!db.objectStoreNames.contains("chunks") || !db.objectStoreNames.contains("meta")) {
+      db.close();
+      throw new Error("The local game vault is incomplete.");
+    }
+
+    const meta = await readValue(db, "meta", gameKey);
+    const chunkCount = Number(meta && meta.chunks);
+    if (!meta || !meta.complete || !Number.isSafeInteger(chunkCount) || chunkCount < 1) {
+      db.close();
+      throw new Error("The saved game is incomplete.");
+    }
+
+    let chunkIndex = 0;
+    const body = new ReadableStream({
+      async pull(controller) {
+        if (chunkIndex >= chunkCount) {
+          db.close();
+          controller.close();
+          return;
+        }
+
+        try {
+          const row = await readValue(db, "chunks", [gameKey, chunkIndex]);
+          if (!row || row.data == null) throw new Error("A saved game chunk is missing.");
+          const chunk = row.data instanceof Blob ? row.data : new Blob([row.data]);
+          controller.enqueue(new Uint8Array(await chunk.arrayBuffer()));
+          chunkIndex += 1;
+        } catch (error) {
+          db.close();
+          controller.error(error);
+        }
+      },
+      cancel() {
+        db.close();
+      }
+    });
+
+    return new Response(body, {
       status: 200,
-      headers: { ...ISOLATION_HEADERS, "Content-Type": "text/html; charset=utf-8" }
+      headers: {
+        ...ISOLATION_HEADERS,
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Length": String(meta.bytes)
+      }
     });
   } catch (_) {
     return new Response("The saved game could not be read. Return to the launcher and retry.", {
