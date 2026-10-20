@@ -900,18 +900,6 @@
         return completed;
       }
 
-      async function assembleBlob(gameKey, meta) {
-        const rows = await getChunks(gameKey);
-        if (!rows.length) throw new DownloadError("EMPTY", "No saved chunks were found.");
-        if (meta && meta.complete && Number(meta.chunks) && rows.length < Number(meta.chunks)) {
-          throw new DownloadError("MISSING_CHUNKS", "The local build is incomplete.");
-        }
-        const parts = rows.map((row) => row.data instanceof Blob ? row.data : new Blob([row.data]));
-        const blob = new Blob(parts, { type: "text/html" });
-        if (!blob.size) throw new DownloadError("EMPTY_BLOB", "The local build is empty.");
-        return blob;
-      }
-
       function openStage(game) {
         let tab = null;
         try {
@@ -1059,35 +1047,28 @@
         } catch (_) {}
       }
 
-      function launchBlob(tab, game, blob) {
-        const url = URL.createObjectURL(blob);
-        const doc = tab.document;
-        const iframe = doc.createElement("iframe");
-        iframe.title = game.name;
-        iframe.allow = "fullscreen; autoplay; gamepad";
-        iframe.allowFullscreen = true;
-        iframe.referrerPolicy = "no-referrer";
-        iframe.style.cssText = "position:fixed;inset:0;width:100%;height:100%;border:0;background:#000;display:block";
-        iframe.src = url;
-
-        doc.title = game.name;
-        doc.documentElement.style.background = "#000";
-        doc.body.style.cssText = "margin:0;padding:0;overflow:hidden;background:#000;display:block";
-        doc.body.replaceChildren(iframe);
-
-        window.setTimeout(() => {
-          try {
-            iframe.focus();
-            tab.focus();
-          } catch (_) {}
-        }, 140);
-
-        try {
-          tab.addEventListener("pagehide", () => URL.revokeObjectURL(url), { once: true });
-        } catch (_) {
-          window.setTimeout(() => URL.revokeObjectURL(url), 60 * 60 * 1000);
+      async function launchIsolated(tab, gameKey) {
+        if (!window.isSecureContext || !navigator.serviceWorker) {
+          throw new DownloadError("COI_ORIGIN", "Cross-origin isolation requires HTTPS or localhost. Open the launcher from a secure origin.");
         }
-        return url;
+
+        let registration;
+        try {
+          const workerUrl = new URL("./local-play-sw.js", location.href);
+          const scopeUrl = new URL("./", location.href);
+          registration = await navigator.serviceWorker.register(workerUrl.href, { scope: scopeUrl.pathname });
+          await navigator.serviceWorker.ready;
+        } catch (error) {
+          throw new DownloadError("COI_WORKER", "Could not install the isolation worker. Open the launcher over HTTPS or localhost.");
+        }
+
+        if (!registration.active) {
+          throw new DownloadError("COI_WORKER", "The isolation worker did not activate. Reload the launcher and try again.");
+        }
+
+        const gameUrl = new URL("./__local-play-game__.html", location.href);
+        gameUrl.searchParams.set("game", gameKey);
+        tab.location.replace(gameUrl.href);
       }
 
       function friendlyError(error) {
@@ -1096,6 +1077,8 @@
         if (error.code === "QUOTA" || error.name === "QuotaExceededError") return "NOT ENOUGH STORAGE — CLEAR A BUILD";
         if (error.code === "API_KEY") return "DRIVE API KEY INVALID — TAP RUN TO RE-ENTER";
         if (error.code === "NO_KEY") return "DRIVE API KEY REQUIRED — TAP RUN";
+        if (error.code === "COI_ORIGIN") return "COI NEEDS HTTPS OR LOCALHOST";
+        if (error.code === "COI_WORKER") return "ISOLATION WORKER FAILED — RELOAD LAUNCHER";
         if (error.code === "DRIVE_WARNING" || error.code === "HTTP_403") return "DRIVE BLOCKED THE DOWNLOAD — TRY AGAIN";
         if (error.code === "HTTP_404") return "FILE NOT FOUND ON DRIVE";
         if (error.code === "NO_STREAM") return "THIS BROWSER CANNOT STREAM THE FILE";
@@ -1182,18 +1165,15 @@
             return;
           }
 
-          paint(gameKey, "launching", { meta: meta, text: "ASSEMBLING LOCAL BUILD…" });
-          updateStage(tab, 94, "Assembling from IndexedDB", "Reading local chunks…");
-
-          const blob = await assembleBlob(gameKey, meta);
-          updateStage(tab, 100, "Starting game", formatBytes(blob.size) + " ready");
+          paint(gameKey, "launching", { meta: meta, text: "PREPARING ISOLATED GAME…" });
+          updateStage(tab, 94, "Preparing isolated game context", "Applying COOP / COEP headers…");
 
           if (tab.closed) {
             paint(gameKey, "success", { meta: meta, text: "SAVED · TAP RUN TO PLAY" });
             return;
           }
 
-          launchBlob(tab, game, blob);
+          await launchIsolated(tab, gameKey);
           paint(gameKey, "success", { meta: meta, text: "PLAYING IN NEW TAB" });
         } catch (error) {
           failed = true;
